@@ -12,6 +12,7 @@ using ThirdParty.Json.LitJson;
 using Amazon.Common.DotNetCli.Tools;
 using Amazon.Common.DotNetCli.Tools.Commands;
 using Amazon.Common.DotNetCli.Tools.Options;
+using Amazon.Runtime.Internal;
 
 namespace Amazon.Lambda.Tools.Commands
 {
@@ -464,19 +465,35 @@ namespace Amazon.Lambda.Tools.Commands
                     }
                     else if (packageType == Lambda.PackageType.Image)
                     {
-                        updateCodeRequest.ImageUri = ecrImageUri;                       
+                        updateCodeRequest.ImageUri = ecrImageUri;
+                    }
+
+                    var configUpdated = false;
+                    try
+                    {
+                        // Update config should run before updating the function code to avoid a situation such as
+                        // upgrading from an EOL .NET version to a supported version where the update would fail 
+                        // since lambda thinks we are updating an EOL version instead of upgrading.
+                        configUpdated = await base.UpdateConfigAsync(currentConfiguration, layerPackageInfo.GenerateDotnetSharedStoreValue());
+                    }
+                    catch (Exception e)
+                    {
+                        throw new LambdaToolsException($"Error updating configuration for Lambda function: {e.Message}", LambdaToolsException.LambdaErrorCode.LambdaUpdateFunctionConfiguration, e);
                     }
 
                     try
                     {
+                        await LambdaUtilities.WaitTillFunctionAvailableAsync(Logger, this.LambdaClient, updateCodeRequest.FunctionName);
                         await this.LambdaClient.UpdateFunctionCodeAsync(updateCodeRequest);
                     }
                     catch (Exception e)
                     {
+                        if (configUpdated)
+                        {
+                            await base.AttemptRevertConfigAsync(currentConfiguration);
+                        }
                         throw new LambdaToolsException($"Error updating code for Lambda function: {e.Message}", LambdaToolsException.LambdaErrorCode.LambdaUpdateFunctionCode, e);
                     }
-
-                    await base.UpdateConfigAsync(currentConfiguration, layerPackageInfo.GenerateDotnetSharedStoreValue());
 
                     await base.ApplyTags(currentConfiguration.FunctionArn);
 
